@@ -1,8 +1,4 @@
-
-#с учетом временных сдвигов от -4 до +4 недель
-#С УЧЕТОМ КОНКРЕТНЫХ ЗНАЧЕНИЙ ГОД И НЕДЕЛЯ
-
-#Версия 3.1 - Автоматический поиск файлов и пропуск заголовков
+#Версия 3.1
 
 import pandas as pd
 import numpy as np
@@ -35,7 +31,7 @@ LAG_RANGE = range(-4, 5)  # от -4 до +4
 PRODUCT_COLUMN = 'Группа продукта'
 
 # Колонка с типом/формой продукта
-FORM_COLUMN = 'mrt_archive_total[FormOfSubstance_group]'
+FORM_COLUMN = "'mrt_archive_total'[FormOfSubstance_group]"
 
 # Колонка с локацией
 LOCATION_COLUMN = 'Локация'
@@ -467,7 +463,11 @@ def main():
         print(f"✓ Создана папка для результатов: '{OUTPUT_FOLDER}'")
     
     # 5. Формирование полного пути к выходному файлу
-    output_path = os.path.join(OUTPUT_FOLDER, OUTPUT_FILE)
+    product_name = df[PRODUCT_COLUMN].iloc[0] if PRODUCT_COLUMN in df.columns else "Product"
+    safe_product_name = product_name.replace(' ', '_').replace('/', '_')[:20]
+    output_filename_with_product = f"{safe_product_name}_correlation_analysis_results.xlsx"
+    output_path = os.path.join(OUTPUT_FOLDER, output_filename_with_product)
+
     
     # 6. Создание отчета
     output_file = create_full_excel_report(
@@ -491,11 +491,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# Сохраняем файл
-with open('correlation_analysis.py', 'w', encoding='utf-8') as f:
-    f.write(final_code)
 
 print("="*80)
 print("✅ ФИНАЛЬНЫЙ ИСПРАВЛЕННЫЙ КОД СОЗДАН")
