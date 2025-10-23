@@ -1,20 +1,31 @@
+
+#с учетом временных сдвигов от -4 до +4 недель
+#С УЧЕТОМ КОНКРЕТНЫХ ЗНАЧЕНИЙ ГОД И НЕДЕЛЯ
+
+#Версия 3.1 - Автоматический поиск файлов и пропуск заголовков
+
 import pandas as pd
 import numpy as np
 from scipy.stats import pearsonr
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
+import os
+import glob
 
 # ============================================================================
 # НАСТРОЙКИ
 # ============================================================================
 
-# Укажите путь к вашему Excel файлу
-INPUT_FILE = './input/mop.xlsx'  # ИЗМЕНИТЕ НА ИМЯ ВАШЕГО ФАЙЛА
+# Папка с входными файлами
+INPUT_FOLDER = './input'
+
+# Папка для выходных файлов
+OUTPUT_FOLDER = './output'
 
 # Укажите имя листа, если нужно (оставьте None для первого листа)
 SHEET_NAME = None  # или 'Sheet1', 'Данные' и т.д.
 
-# Выходной файл
+# Выходной файл (будет создан в OUTPUT_FOLDER)
 OUTPUT_FILE = 'correlation_analysis_results.xlsx'
 
 # Диапазон сдвигов для анализа (недели)
@@ -24,7 +35,7 @@ LAG_RANGE = range(-4, 5)  # от -4 до +4
 PRODUCT_COLUMN = 'Группа продукта'
 
 # Колонка с типом/формой продукта
-FORM_COLUMN = "'mrt_archive_total'[FormOfSubstance_group]"
+FORM_COLUMN = 'mrt_archive_total[FormOfSubstance_group]'
 
 # Колонка с локацией
 LOCATION_COLUMN = 'Локация'
@@ -42,11 +53,41 @@ METRICS = ['max', 'avg', 'min']
 # ОСНОВНЫЕ ФУНКЦИИ
 # ============================================================================
 
-def load_data(filename, sheet_name=None):
-    """Загружает данные из Excel файла"""
+def find_excel_file(folder_path):
+    #Находит первый Excel файл в указанной папке
     try:
-        # Читаем файл Excel
-        excel_data = pd.read_excel(filename, sheet_name=sheet_name)
+        # Ищем все Excel файлы (правильный синтаксис без обратного слеша)
+        excel_files = (glob.glob(os.path.join(folder_path, '*.xlsx')) + 
+                      glob.glob(os.path.join(folder_path, '*.xls')))
+        
+        # Исключаем временные файлы Excel (начинающиеся с ~$)
+        excel_files = [f for f in excel_files if not os.path.basename(f).startswith('~$')]
+        
+        if not excel_files:
+            print(f"✗ Не найдено Excel файлов в папке '{folder_path}'")
+            return None
+        
+        if len(excel_files) > 1:
+            print(f"\\n⚠ Найдено несколько Excel файлов:")
+            for idx, file in enumerate(excel_files, 1):
+                print(f"  {idx}. {os.path.basename(file)}")
+            print(f"\\n→ Используется первый файл: {os.path.basename(excel_files[0])}")
+        
+        return excel_files[0]
+    except Exception as e:
+        print(f"✗ Ошибка при поиске файлов: {e}")
+        return None
+
+
+def load_data(filename, sheet_name=None):
+
+    #Загружает данные из Excel файла
+    #ВАЖНО: Пропускает первые 2 строки, начинает читать с 3-й строки (header=2)
+
+    try:
+        # Читаем файл Excel, пропуская первые 2 строки
+        # header=2 означает, что заголовки таблицы находятся в строке 3 (индексация с 0)
+        excel_data = pd.read_excel(filename, sheet_name=sheet_name, header=2)
         
         # Проверяем, является ли результат словарем (несколько листов)
         if isinstance(excel_data, dict):
@@ -61,7 +102,8 @@ def load_data(filename, sheet_name=None):
         else:
             df = excel_data
         
-        print(f"✓ Данные успешно загружены из '{filename}'")
+        print(f"✓ Данные успешно загружены из '{os.path.basename(filename)}'")
+        print(f"  ⚠ Пропущены первые 2 строки (заголовки берутся из строки 3)")
         print(f"  Размер датасета: {len(df)} строк, {len(df.columns)} колонок")
         print(f"\\n  Доступные колонки:")
         for idx, col in enumerate(df.columns, 1):
@@ -76,7 +118,7 @@ def load_data(filename, sheet_name=None):
 
 
 def calculate_standard_correlations(pivot_data):
-    """Рассчитывает стандартную матрицу корреляций без сдвигов"""
+    #Рассчитывает стандартную матрицу корреляций без сдвигов
     # Используем только колонки с локациями
     location_cols = [col for col in pivot_data.columns if col not in ['Год', 'Неделя', 'time_index']]
     return pivot_data[location_cols].corr()
@@ -88,43 +130,9 @@ def calculate_lagged_correlations_with_time_index(df, form_type, product_name, m
                                                   week_col='Неделя',
                                                   location_col='Локация',
                                                   form_col='mrt_archive_total[FormOfSubstance_group]'):
-    """
-    Рассчитывает корреляции между локациями с временными сдвигами
-    С УЧЕТОМ КОНКРЕТНЫХ ЗНАЧЕНИЙ ГОД И НЕДЕЛЯ
     
-    ЛОГИКА СДВИГОВ:
-    ===============
-    Для пары "Baltic vs Black Sea":
-    - БАЗОВАЯ локация: Baltic (берется как есть, без сдвига)
-    - СРАВНИВАЕМАЯ локация: Black Sea (к ней применяется сдвиг)
-    
-    Lag = 0:  Baltic[неделя N] vs Black Sea[неделя N]
-    Lag = +1: Baltic[неделя N] vs Black Sea[неделя N+1] - Black Sea ОПЕРЕЖАЕТ Baltic на 1 неделю
-    Lag = -1: Baltic[неделя N] vs Black Sea[неделя N-1] - Black Sea ОТСТАЕТ от Baltic на 1 неделю
-    
-    Положительный lag (+1, +2, +3, +4):
-        → Вторая локация (Black Sea) ОПЕРЕЖАЕТ первую (Baltic)
-        → Изменения во второй локации происходят РАНЬШЕ
-    
-    Отрицательный lag (-1, -2, -3, -4):
-        → Вторая локация (Black Sea) ОТСТАЕТ от первой (Baltic)
-        → Изменения в первой локации происходят РАНЬШЕ
-    
-    Parameters:
-    - df: DataFrame с данными
-    - form_type: тип/форма продукта (например, 'granular' или 'prilled')
-    - product_name: название продукта (например, 'Urea')
-    - metric: метрика для анализа ('max', 'avg', 'min')
-    - lags: список сдвигов для анализа
-    - year_col: название колонки с годом
-    - week_col: название колонки с неделей
-    - location_col: название колонки с локацией
-    - form_col: название колонки с типом продукта
-    
-    Returns:
-    - Dictionary с результатами корреляций для каждой пары локаций
-    - Pivot таблица с данными
-    """
+    #Рассчитывает корреляции между локациями с временными сдвигами
+    #С УЧЕТОМ КОНКРЕТНЫХ ЗНАЧЕНИЙ ГОД И НЕДЕЛЯ
     
     # Фильтруем данные по типу продукта
     df_filtered = df[df[form_col] == form_type].copy()
@@ -239,7 +247,7 @@ def calculate_lagged_correlations_with_time_index(df, form_type, product_name, m
 
 
 def create_correlation_summary_table(corr_results):
-    """Создает сводную таблицу корреляций в удобном формате"""
+    #Создает сводную таблицу корреляций в удобном формате
     if not corr_results:
         return pd.DataFrame()
     
@@ -257,16 +265,7 @@ def create_correlation_summary_table(corr_results):
 
 
 def write_dataframe_with_title(writer, sheet_name, title, df, title_row=0):
-    """
-    Записывает DataFrame в Excel с заголовком в первой строке
-    
-    Parameters:
-    - writer: ExcelWriter объект
-    - sheet_name: имя листа
-    - title: текст заголовка
-    - df: DataFrame для записи
-    - title_row: номер строки для заголовка (0-indexed)
-    """
+    #Записывает DataFrame в Excel с заголовком в первой строке
     # Записываем DataFrame со сдвигом на 2 строки (заголовок + пустая строка)
     df.to_excel(writer, sheet_name=sheet_name, startrow=title_row + 2, index=False)
     
@@ -297,9 +296,7 @@ def create_full_excel_report(df, output_filename,
                              week_column=WEEK_COLUMN,
                              metrics=METRICS,
                              lags=LAG_RANGE):
-    """
-    Создает полный Excel отчет с результатами анализа на разных листах
-    """
+    #Создает полный Excel отчет с результатами анализа на разных листах
     
     print("\\n" + "="*80)
     print("СОЗДАНИЕ ОТЧЕТА")
@@ -313,8 +310,6 @@ def create_full_excel_report(df, output_filename,
     writer = pd.ExcelWriter(output_filename, engine='openpyxl')
     
     sheet_num = 1
-    all_results = {}
-    all_pivots = {}
     
     # Для каждого типа продукта
     for form_type in sorted(unique_forms):
@@ -403,15 +398,14 @@ def create_full_excel_report(df, output_filename,
                     })
                 detail_df = pd.DataFrame(detail_data)
                 
-                # Формируем полный заголовок с пояснением
+                # Формируем полный заголовок с пояснением (ПРАВИЛЬНЫЙ СИНТАКСИС)
                 base_loc, compare_loc = pair_name.split(' vs ')
                 title = (
-                        f"{product_name} {form_type.upper()}: {pair_name}\n"
-                        f"БАЗОВАЯ локация (без сдвига): {base_loc}\n"
-                        f"СРАВНИВАЕМАЯ локация (со сдвигом): {compare_loc}\n"
-                        f"Lag > 0: {compare_loc} ОПЕРЕЖАЕТ {base_loc} | Lag < 0: {compare_loc} ОТСТАЕТ от {base_loc}"
-                        )
-
+                    f"{product_name} {form_type.upper()}: {pair_name}\\n"
+                    f"БАЗОВАЯ локация (без сдвига): {base_loc}\\n"
+                    f"СРАВНИВАЕМАЯ локация (со сдвигом): {compare_loc}\\n"
+                    f"Lag > 0: {compare_loc} ОПЕРЕЖАЕТ {base_loc} | Lag < 0: {compare_loc} ОТСТАЕТ от {base_loc}"
+                )
                 
                 # Записываем с заголовком
                 write_dataframe_with_title(writer, sheet_name, title, detail_df)
@@ -433,22 +427,30 @@ def create_full_excel_report(df, output_filename,
 # ============================================================================
 
 def main():
-    """Основная функция для запуска анализа"""
+    #Основная функция для запуска анализа
     
     print("="*80)
     print("АНАЛИЗ КОРРЕЛЯЦИЙ МЕЖДУ ЛОКАЦИЯМИ ДЛЯ ПРОДУКТОВ")
-    print("С УЧЕТОМ КОНКРЕТНЫХ ЗНАЧЕНИЙ ГОД И НЕДЕЛЯ (Версия 3.0)")
+    print("С УЧЕТОМ КОНКРЕТНЫХ ЗНАЧЕНИЙ ГОД И НЕДЕЛЯ (Версия 3.1)")
     print("="*80)
     
-    # 1. Загрузка данных
-    print("\\n→ Загрузка данных...")
-    df = load_data(INPUT_FILE, SHEET_NAME)
+    # 1. Поиск Excel файла в папке input
+    print(f"\\n→ Поиск Excel файлов в папке '{INPUT_FOLDER}'...")
+    input_file = find_excel_file(INPUT_FOLDER)
     
-    if df is None:
-        print("\\n✗ Не удалось загрузить данные. Проверьте путь к файлу.")
+    if input_file is None:
+        print("\\n✗ Не найден Excel файл для обработки.")
         return
     
-    # 2. Проверка наличия необходимых колонок
+    # 2. Загрузка данных (с пропуском первых 2 строк)
+    print(f"\\n→ Загрузка данных из файла...")
+    df = load_data(input_file, SHEET_NAME)
+    
+    if df is None:
+        print("\\n✗ Не удалось загрузить данные. Проверьте формат файла.")
+        return
+    
+    # 3. Проверка наличия необходимых колонок
     required_columns = [PRODUCT_COLUMN, FORM_COLUMN, LOCATION_COLUMN, YEAR_COLUMN, WEEK_COLUMN] + METRICS
     missing_columns = [col for col in required_columns if col not in df.columns]
     
@@ -459,10 +461,18 @@ def main():
     
     print("\\n✓ Все необходимые колонки найдены")
     
-    # 3. Создание отчета
+    # 4. Создание выходной папки, если её нет
+    if not os.path.exists(OUTPUT_FOLDER):
+        os.makedirs(OUTPUT_FOLDER)
+        print(f"✓ Создана папка для результатов: '{OUTPUT_FOLDER}'")
+    
+    # 5. Формирование полного пути к выходному файлу
+    output_path = os.path.join(OUTPUT_FOLDER, OUTPUT_FILE)
+    
+    # 6. Создание отчета
     output_file = create_full_excel_report(
         df=df,
-        output_filename=OUTPUT_FILE,
+        output_filename=output_path,
         product_column=PRODUCT_COLUMN,
         form_column=FORM_COLUMN,
         location_column=LOCATION_COLUMN,
@@ -484,22 +494,17 @@ if __name__ == "__main__":
 
 
 # Сохраняем файл
-with open('correlation_analysis_universal.py', 'w', encoding='utf-8') as f:
-    f.write(universal_code)
+with open('correlation_analysis.py', 'w', encoding='utf-8') as f:
+    f.write(final_code)
 
 print("="*80)
-print("✓ УНИВЕРСАЛЬНЫЙ КОД СОЗДАН (Версия 3.0)")
+print("✅ ФИНАЛЬНЫЙ ИСПРАВЛЕННЫЙ КОД СОЗДАН")
 print("="*80)
-print("\nФайл: correlation_analysis_universal.py")
-print("\nОсновные изменения:")
-print("✅ Название продукта берется из столбца 'Группа продукта'")
-print("✅ Тип продукта берется из столбца 'mrt_archive_total[FormOfSubstance_group]'")
-print("✅ Код работает для ЛЮБОГО продукта (Urea, Ammonia, MAP, DAP и т.д.)")
-print("✅ Код работает для ЛЮБОГО типа продукта (granular, prilled, и т.д.)")
-print("✅ Автоматически обрабатывает все уникальные комбинации продукт+тип")
-print("\nПример:")
-print("  Если в данных есть:")
-print("    - Urea / granular")
-print("    - Urea / prilled")
-print("    - Ammonia / liquid")
-print("  То для каждой комбинации создаются отдельные листы с правильными названиями")
+print("\nФайл: correlation_analysis.py")
+print("\nВсе ошибки исправлены:")
+print("✅ Убраны все обратные слеши (\\\\) для переноса строк")
+print("✅ Используются скобки () для многострочных выражений")
+print("✅ Исправлены f-строки")
+print("✅ Правильный синтаксис для glob.glob()")
+print("\nТеперь просто запустите:")
+print("  python correlation_analysis.py")
