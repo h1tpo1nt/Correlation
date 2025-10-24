@@ -1,4 +1,4 @@
-# Версия 4.0 - ПОЛНЫЙ ИНТЕГРИРОВАННЫЙ КОД
+# Версия 4.1 - ВСЕ ВОЗМОЖНЫЕ КОМБИНАЦИИ СПРЕДОВ
 # Correlation + Spreads в ОДНОМ файле
 
 import pandas as pd
@@ -127,19 +127,31 @@ def calculate_lagged_correlations_with_time_index(df, form_type, product_name, m
                     }
     return results, pivot
 
-def calculate_spreads_vs_max(pivot_df):
-    """Спреды относительно самой дорогой локации"""
+def calculate_all_spreads(pivot_df):
+    """Рассчитывает ВСЕ возможные спреды между локациями (включая обратные)"""
     location_cols = [col for col in pivot_df.columns if col not in ['Год', 'Неделя', 'time_index']]
+    
     if len(location_cols) < 2:
-        return None, None
-    avg_prices = {loc: pivot_df[loc].mean() for loc in location_cols}
-    max_loc = max(avg_prices, key=avg_prices.get)
-    print(f"  → Базовая: {max_loc} (средняя: {avg_prices[max_loc]:.2f})")
+        return None
+    
+    print(f"  → Рассчитываем ВСЕ комбинации спредов для {len(location_cols)} локаций")
+    
     spreads_df = pivot_df[['Год', 'Неделя']].copy()
-    for loc in location_cols:
-        if loc != max_loc:
-            spreads_df[f"{max_loc} - {loc}"] = pivot_df[max_loc] - pivot_df[loc]
-    return spreads_df, max_loc
+    spread_count = 0
+    
+    # ВСЕ возможные комбинации (i, j) где i != j
+    for i, loc1 in enumerate(location_cols):
+        for j, loc2 in enumerate(location_cols):
+            if i == j:  # Только избегаем самого себя (A-A)
+                continue
+            
+            # Спред = loc1 - loc2
+            spread_name = f"{loc1} - {loc2}"
+            spreads_df[spread_name] = pivot_df[loc1] - pivot_df[loc2]
+            spread_count += 1
+    
+    print(f"  → Создано {spread_count} спредов (включая обратные)")
+    return spreads_df
 
 def create_correlation_summary_table(corr_results):
     if not corr_results:
@@ -205,14 +217,13 @@ def create_full_report(df, output_filename):
             continue
         data = all_data[form_type]
         if len(data['form_pivots']['avg']) > 0:
-            spreads_df, max_loc = calculate_spreads_vs_max(data['form_pivots']['avg'])
+            spreads_df = calculate_all_spreads(data['form_pivots']['avg'])
             if spreads_df is not None:
                 spreads_sheets.append({
                     'name': f'SPREADS_{data["safe_form"]}'[:31],
                     'data': spreads_df,
                     'product_name': data['product_name'],
-                    'form_type': form_type,
-                    'max_loc': max_loc
+                    'form_type': form_type
                 })
     
     # Собираем остальные листы
@@ -286,10 +297,10 @@ def create_full_report(df, output_filename):
             'bg_color': '#4472C4', 'align': 'left'
         })
         ws.merge_range('A1:J1', 
-                      f"{sheet_info['product_name']} {sheet_info['form_type'].upper()} - СПРЕДЫ (база: {sheet_info['max_loc']})", 
+                      f"{sheet_info['product_name']} {sheet_info['form_type'].upper()} - ВСЕ СПРЕДЫ", 
                       hdr_fmt)
         sub_fmt = workbook.add_format({'italic': True, 'font_size': 11, 'color': '#114477'})
-        ws.merge_range('A2:J2', "Расчет по: avg (средняя цена)", sub_fmt)
+        ws.merge_range('A2:J2', "Расчет по: avg (средняя цена). Все комбинации локаций", sub_fmt)
         
         # График
         chart = workbook.add_chart({'type': 'line'})
@@ -302,7 +313,7 @@ def create_full_report(df, output_filename):
                 'values': [sheet_name, 4, col_idx, 3 + len(sheet_info['data']), col_idx],
                 'line': {'width': 2}
             })
-        chart.set_title({'name': f'{sheet_info["product_name"]} {sheet_info["form_type"]}: Спреды vs {sheet_info["max_loc"]}'})
+        chart.set_title({'name': f'{sheet_info["product_name"]} {sheet_info["form_type"]}: Все спреды'})
         chart.set_x_axis({'name': 'Неделя'})
         chart.set_y_axis({'name': 'Спред (USD/mt)'})
         chart.set_legend({'position': 'bottom'})
@@ -311,7 +322,7 @@ def create_full_report(df, output_filename):
         ws.set_column('A:B', 10)
         ws.set_column('C:K', 18)
         
-        print(f"✓ Лист {sheet_num}: SPREADS")
+        print(f"✓ Лист {sheet_num}: SPREADS (все комбинации)")
         sheet_num += 1
     
     # 2. Затем ВСЕ остальные
@@ -330,12 +341,10 @@ def create_full_report(df, output_filename):
     print("="*80)
     return output_filename
 
-
-
 def main():
     print("="*80)
-    print("ПОЛНЫЙ АНАЛИЗ: SPREADS + CORRELATIONS")
-    print("Версия 4.0")
+    print("ПОЛНЫЙ АНАЛИЗ: ALL SPREADS + CORRELATIONS")
+    print("Версия 4.1")
     print("="*80)
     
     input_file = find_excel_file(INPUT_FOLDER)
