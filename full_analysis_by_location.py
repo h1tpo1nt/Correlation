@@ -1,5 +1,5 @@
-# Версия 5.5 - АНАЛИЗ ПО ГРУППАМ ПРОДУКТОВ С УЛУЧШЕННЫМИ СОКРАЩЕНИЯМИ
-# Исправлена логика сокращений с отладкой
+# Версия 6.1 - АНАЛИЗ ПО ГРУППАМ ПРОДУКТОВ + СПРЕДЫ ПО ДВ
+# Исправлен расчет: делим цену на числовое значение N (не проценты)
 
 import pandas as pd
 import numpy as np
@@ -38,7 +38,25 @@ ABBREVIATIONS = {
     'compacted': 'cmpct'
 }
 
+# Словарь действующего вещества (N) для продуктов - ЧИСЛОВЫЕ ЗНАЧЕНИЯ
+ACTIVE_SUBSTANCE_N = {
+    'AS': 21.0,
+    'AN': 34.4,
+    'CAN': 20.4,
+    'Urea': 46.2,
+    'UAN': 30.0,
+    'NS': 27.0,
+    'ATS': 12.0
+}
+
 # ============= ВСПОМОГАТЕЛЬНЫЕ ==================
+
+def get_product_base_name(product_key):
+    """Извлекает базовое название продукта (AS, AN, Urea и т.д.)"""
+    for product_name in ACTIVE_SUBSTANCE_N.keys():
+        if product_key.startswith(product_name):
+            return product_name
+    return None
 
 def abbreviate_product_name(name):
     """
@@ -53,17 +71,11 @@ def abbreviate_product_name(name):
     
     # Проходим по всем сокращениям и заменяем (case-insensitive)
     for full_word, abbrev in ABBREVIATIONS.items():
-        # Используем регулярное выражение для замены целых слов
-        # Ищем слово с учетом границ, дефисов и подчеркиваний
         pattern = re.compile(
             r'(?<![a-zA-Z])' + re.escape(full_word) + r'(?![a-zA-Z])', 
             re.IGNORECASE
         )
         result = pattern.sub(abbrev, result)
-    
-    # Отладочный вывод (можно закомментировать после проверки)
-    if result != original:
-        print(f"    Сокращение: '{original}' → '{result}'")
     
     return result
 
@@ -211,18 +223,55 @@ def calculate_lagged_correlations_by_groups(df, location_filter, metric='avg',
     
     return results, pivot
 
-def calculate_all_spreads(pivot_df):
+def calculate_active_substance_prices(pivot_df):
+    """
+    Рассчитывает цены по действующему веществу (ДВ)
+    Делит цену на числовое значение содержания N
+    Например: 400 / 34.4 = 11.63 (цена за единицу N)
+    """
+    group_cols = [col for col in pivot_df.columns if col not in ['Год', 'Неделя', 'time_index']]
+    
+    print(f"\n  → Рассчитываем цены по ДВ для {len(group_cols)} групп")
+    
+    dv_pivot = pivot_df[['Год', 'Неделя', 'time_index']].copy()
+    converted_count = 0
+    skipped_groups = []
+    
+    for group in group_cols:
+        # Определяем базовое название продукта
+        base_product = get_product_base_name(group)
+        
+        if base_product and base_product in ACTIVE_SUBSTANCE_N:
+            n_content = ACTIVE_SUBSTANCE_N[base_product]
+            # Рассчитываем цену за единицу N: цена / N
+            dv_pivot[f"{group}_ДВ"] = pivot_df[group] / n_content
+            converted_count += 1
+            print(f"    ✓ {group} → {group}_ДВ (N={n_content}, например: 400/{n_content} = {400/n_content:.2f})")
+        else:
+            skipped_groups.append(group)
+    
+    print(f"\n  → Конвертировано в ДВ: {converted_count} групп")
+    if skipped_groups:
+        print(f"  → Пропущено (нет данных о N): {len(skipped_groups)} групп")
+        for sg in skipped_groups[:3]:
+            print(f"     - {sg}")
+    
+    return dv_pivot
+
+def calculate_all_spreads(pivot_df, is_dv=False):
     """
     Рассчитывает ВСЕ возможные спреды между группами продуктов (включая обратные)
     С СОКРАЩЕННЫМИ НАЗВАНИЯМИ
     """
-    group_cols = [col for col in pivot_df.columns if col not in ['Год', 'Неделя', 'time_index']]
+    if is_dv:
+        group_cols = [col for col in pivot_df.columns if col not in ['Год', 'Неделя', 'time_index'] and col.endswith('_ДВ')]
+    else:
+        group_cols = [col for col in pivot_df.columns if col not in ['Год', 'Неделя', 'time_index']]
     
     if len(group_cols) < 2:
         return None
     
-    print(f"\n  → Рассчитываем ВСЕ комбинации спредов для {len(group_cols)} групп")
-    print(f"  → Применяем сокращения к названиям групп:")
+    print(f"\n  → Рассчитываем ВСЕ комбинации спредов{' по ДВ' if is_dv else ''} для {len(group_cols)} групп")
     
     spreads_df = pivot_df[['Год', 'Неделя']].copy()
     spread_count = 0
@@ -250,11 +299,6 @@ def calculate_all_spreads(pivot_df):
             spread_count += 1
     
     print(f"\n  → Создано {spread_count} спредов (включая обратные комбинации)")
-    print(f"  → Примеры результатов:")
-    for abbrev_name, (orig1, orig2) in list(abbreviation_map.items())[:5]:
-        print(f"     '{abbrev_name}'")
-        if abbrev_name != f"{orig1} - {orig2}":
-            print(f"       (оригинал: '{orig1} - {orig2}')")
     
     return spreads_df, abbreviation_map
 
@@ -275,7 +319,7 @@ def create_correlation_summary_table(corr_results):
 
 def create_full_report(df, output_filename, form_col):
     print("\n" + "="*80)
-    print("СОЗДАНИЕ ПОЛНОГО ОТЧЕТА ПО ГРУППАМ ПРОДУКТОВ (SPREADS ПЕРВЫМИ)")
+    print("СОЗДАНИЕ ПОЛНОГО ОТЧЕТА ПО ГРУППАМ ПРОДУКТОВ (SPREADS + ДВ ПЕРВЫМИ)")
     print("="*80)
     
     unique_locations = sorted(df[LOCATION_COLUMN].unique())
@@ -290,6 +334,10 @@ def create_full_report(df, output_filename, form_col):
         'bold': True, 'font_size': 14, 'font_color': 'white',
         'bg_color': '#4472C4', 'align': 'left', 'valign': 'vcenter'
     })
+    header_fmt_dv = workbook.add_format({
+        'bold': True, 'font_size': 14, 'font_color': 'white',
+        'bg_color': '#70AD47', 'align': 'left', 'valign': 'vcenter'
+    })
     subheader_fmt = workbook.add_format({
         'italic': True, 'font_size': 11, 'color': '#114477', 'text_wrap': True
     })
@@ -297,8 +345,9 @@ def create_full_report(df, output_filename, form_col):
         'font_size': 10, 'color': '#666666', 'italic': True
     })
     
-    spreads_sheets = []
-    other_sheets = []
+    spreads_dv_sheets = []  # Листы SPREADS по ДВ
+    spreads_sheets = []     # Листы SPREADS обычные
+    other_sheets = []       # Все остальные листы
     
     all_data = {}
     
@@ -322,7 +371,28 @@ def create_full_report(df, output_filename, form_col):
             'location_pivots': location_pivots
         }
     
-    # Собираем листы SPREADS
+    # Собираем листы SPREADS ПО ДВ (первыми!)
+    for location in unique_locations:
+        if location not in all_data:
+            continue
+        data = all_data[location]
+        if len(data['location_pivots']['avg']) > 0:
+            # Рассчитываем цены по ДВ
+            dv_pivot = calculate_active_substance_prices(data['location_pivots']['avg'])
+            
+            if len([col for col in dv_pivot.columns if col.endswith('_ДВ')]) >= 2:
+                spreads_dv_result = calculate_all_spreads(dv_pivot, is_dv=True)
+                if spreads_dv_result is not None:
+                    spreads_dv_df, abbreviation_map_dv = spreads_dv_result
+                    spreads_dv_sheets.append({
+                        'name': f'SPREADS_ДВ_{data["safe_location"]}'[:31],
+                        'data': spreads_dv_df,
+                        'location': location,
+                        'abbreviation_map': abbreviation_map_dv,
+                        'type': 'spreads_dv'
+                    })
+    
+    # Собираем листы SPREADS обычные
     for location in unique_locations:
         if location not in all_data:
             continue
@@ -338,7 +408,8 @@ def create_full_report(df, output_filename, form_col):
                     'data': spreads_df,
                     'location': location,
                     'groups': group_cols,
-                    'abbreviation_map': abbreviation_map
+                    'abbreviation_map': abbreviation_map,
+                    'type': 'spreads'
                 })
     
     # Собираем остальные листы
@@ -406,7 +477,55 @@ def create_full_report(df, output_filename, form_col):
     
     sheet_num = 1
     
-    # 1. Сначала ВСЕ SPREADS
+    # 1. СНАЧАЛА ВСЕ SPREADS ПО ДВ
+    for sheet_info in spreads_dv_sheets:
+        sheet_name = f'{sheet_num}_{sheet_info["name"]}'
+        sheet_info['data'].to_excel(writer, sheet_name=sheet_name, index=False, startrow=5)
+        ws = writer.sheets[sheet_name]
+        
+        # ЗАГОЛОВОК С ПОЯСНЕНИЕМ (зеленый для ДВ)
+        ws.merge_range('A1:J1', 
+                      f"ЛОКАЦИЯ: {sheet_info['location']} - СПРЕДЫ ПО ДЕЙСТВУЮЩЕМУ ВЕЩЕСТВУ (N)", 
+                      header_fmt_dv)
+        
+        explanation = (f"Цены пересчитаны на действующее вещество (цена / содержание N). "
+                      f"Спреды рассчитаны по метрике: {METRIC_LABELS['avg']}. "
+                      f"Включены ВСЕ комбинации (A-B и B-A).")
+        ws.merge_range('A2:J2', explanation, subheader_fmt)
+        
+        # Показываем коэффициенты N
+        n_info = ", ".join([f"{k}={v}" for k, v in ACTIVE_SUBSTANCE_N.items()])
+        ws.merge_range('A3:J3', f"Содержание N (числа): {n_info}", info_fmt)
+        
+        ws.merge_range('A4:J4', 
+                      f"Количество спредов: {len(sheet_info['data'].columns)-2} | "
+                      f"Период данных: {sheet_info['data']['Год'].min()}-{sheet_info['data']['Год'].max()}",
+                      info_fmt)
+        
+        # График
+        chart = workbook.add_chart({'type': 'line'})
+        spread_cols = [col for col in sheet_info['data'].columns if col not in ['Год', 'Неделя']]
+        for col in spread_cols[:10]:
+            col_idx = list(sheet_info['data'].columns).index(col)
+            chart.add_series({
+                'name': [sheet_name, 5, col_idx],
+                'categories': [sheet_name, 6, 1, 5 + len(sheet_info['data']), 1],
+                'values': [sheet_name, 6, col_idx, 5 + len(sheet_info['data']), col_idx],
+                'line': {'width': 2}
+            })
+        chart.set_title({'name': f'{sheet_info["location"]}: Спреды по ДВ'})
+        chart.set_x_axis({'name': 'Неделя'})
+        chart.set_y_axis({'name': 'Спред ДВ (USD за единицу N)'})
+        chart.set_legend({'position': 'bottom'})
+        chart.set_size({'width': 1000, 'height': 500})
+        ws.insert_chart('L6', chart)
+        ws.set_column('A:B', 10)
+        ws.set_column('C:K', 24)
+        
+        print(f"✓ Лист {sheet_num}: SPREADS ПО ДВ для {sheet_info['location']}")
+        sheet_num += 1
+    
+    # 2. ЗАТЕМ ВСЕ SPREADS ОБЫЧНЫЕ
     for sheet_info in spreads_sheets:
         sheet_name = f'{sheet_num}_{sheet_info["name"]}'
         sheet_info['data'].to_excel(writer, sheet_name=sheet_name, index=False, startrow=5)
@@ -417,10 +536,9 @@ def create_full_report(df, output_filename, form_col):
                       f"ЛОКАЦИЯ: {sheet_info['location']} - ВСЕ СПРЕДЫ МЕЖДУ ГРУППАМИ ПРОДУКТОВ", 
                       header_fmt)
         
-        # Создаем строку с примерами сокращений
         abbrev_examples = []
         for abbrev_name, (orig1, orig2) in list(sheet_info['abbreviation_map'].items())[:3]:
-            if abbrev_name != f"{orig1} - {orig2}":  # Только если есть сокращение
+            if abbrev_name != f"{orig1} - {orig2}":
                 abbrev_examples.append(f"'{abbrev_name}' ← '{orig1}-{orig2}'")
         
         abbrev_text = "; ".join(abbrev_examples) if abbrev_examples else "Нет сокращений в данных"
@@ -442,7 +560,7 @@ def create_full_report(df, output_filename, form_col):
         # График
         chart = workbook.add_chart({'type': 'line'})
         spread_cols = [col for col in sheet_info['data'].columns if col not in ['Год', 'Неделя']]
-        for col in spread_cols[:10]:  # Ограничиваем для читаемости
+        for col in spread_cols[:10]:
             col_idx = list(sheet_info['data'].columns).index(col)
             chart.add_series({
                 'name': [sheet_name, 5, col_idx],
@@ -459,10 +577,10 @@ def create_full_report(df, output_filename, form_col):
         ws.set_column('A:B', 10)
         ws.set_column('C:K', 22)
         
-        print(f"✓ Лист {sheet_num}: SPREADS для {sheet_info['location']} (все комбинации, сокращенные)")
+        print(f"✓ Лист {sheet_num}: SPREADS для {sheet_info['location']} (все комбинации)")
         sheet_num += 1
     
-    # 2. Затем ВСЕ остальные
+    # 3. Затем ВСЕ остальные
     for sheet_info in other_sheets:
         sheet_name = f'{sheet_num}_{sheet_info["name"]}'[:31]
         
@@ -517,12 +635,15 @@ def create_full_report(df, output_filename, form_col):
 
 def main():
     print("="*80)
-    print("ПОЛНЫЙ АНАЛИЗ: SPREADS + CORRELATIONS ПО ГРУППАМ ПРОДУКТОВ")
-    print("Версия 5.5 - Улучшенные сокращения с отладкой")
+    print("ПОЛНЫЙ АНАЛИЗ: SPREADS + SPREADS ПО ДВ + CORRELATIONS")
+    print("Версия 6.1 - Расчет по действующему веществу (делим на число)")
     print("="*80)
     print(f"\nСловарь сокращений:")
     for full, short in ABBREVIATIONS.items():
         print(f"  {full} → {short}")
+    print(f"\nСодержание действующего вещества N (числа, не проценты):")
+    for product, n_value in ACTIVE_SUBSTANCE_N.items():
+        print(f"  {product} = {n_value} (пример: 400/{n_value} = {400/n_value:.2f})")
     
     input_file = find_excel_file(INPUT_FOLDER)
     if not input_file:
